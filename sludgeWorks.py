@@ -1,343 +1,437 @@
 import libtcodpy as libtcod
+import shelve
+import cProfile
+from random import randint
 
-from death_functions import kill_monster, kill_player
-from entity import get_blocking_entities_at_location
-from fov_functions import initialize_fov, recompute_fov
-from game_messages import Message
-from game_states import GameStates
-from input_handlers import handle_keys, handle_mouse, handle_main_menu
-from loader_functions.initialise_new_game import get_constants, get_game_variables
-from loader_functions.data_loaders import load_game, save_game
-from menus import main_menu, message_box
-from render_functions import clear_all, render_all
-
-
-def main():
-    constants = get_constants()
-
-    libtcod.console_set_custom_font('fonts/terminal8x8_gs_ro.png', libtcod.FONT_TYPE_GREYSCALE | libtcod.FONT_LAYOUT_ASCII_INROW)
-
-    libtcod.console_init_root(constants['screen_width'], constants['screen_height'], constants['window_title'], False)
-
-    con = libtcod.console_new(constants['screen_width'], constants['screen_height'])
-    panel = libtcod.console_new(constants['screen_width'], constants['panel_height'])
-
-    player = None
-    entities = []
-    game_map = None
-    message_log = None
-    game_state = None
-
-    show_main_menu = True
-    show_load_error_message = False
-
-    main_menu_background_image = libtcod.image_load('menu_background.png')
-
-    key = libtcod.Key()
-    mouse = libtcod.Mouse()
-
-    while not libtcod.console_is_window_closed():
-        libtcod.sys_check_for_event(libtcod.EVENT_KEY_PRESS | libtcod.EVENT_MOUSE, key, mouse)
-
-        if show_main_menu:
-            main_menu(con, main_menu_background_image, constants['screen_width'],
-                      constants['screen_height'])
-
-            if show_load_error_message:
-                message_box(con, 'No save game to load', 50, constants['screen_width'], constants['screen_height'])
-
-            libtcod.console_flush()
-
-            action = handle_main_menu(key)
-
-            new_game = action.get('new_game')
-            load_saved_game = action.get('load_game')
-            exit_game = action.get('exit')
-
-            if show_load_error_message and (new_game or load_saved_game or exit_game):
-                show_load_error_message = False
-            elif new_game:
-                player, entities, game_map, message_log, game_state = get_game_variables(constants)
-                game_state = GameStates.PLAYERS_TURN
-
-                show_main_menu = False
-            elif load_saved_game:
-                try:
-                    player, entities, game_map, message_log, game_state = load_game()
-                    show_main_menu = False
-                except FileNotFoundError:
-                    show_load_error_message = True
-            elif exit_game:
-                break
-
-        else:
-            libtcod.console_clear(con)
-            play_game(player, entities, game_map, message_log, game_state, con, panel, constants)
-
-            show_main_menu = True
+import config
+import log
+import algebra
+from components import *
+import renderer
+import interface
+import actions
+import ai
+import items
+import cartographer
 
 
-def play_game(player, entities, game_map, message_log, game_state, con, panel, constants):
-    fov_recompute = True
+INVENTORY_WIDTH = 50
+CHARACTER_SCREEN_WIDTH = 30
+LEVEL_SCREEN_WIDTH = 40
 
-    fov_map = initialize_fov(game_map)
+# Experience and level-ups
+LEVEL_UP_BASE = 200
+LEVEL_UP_FACTOR = 150
 
-    key = libtcod.Key()
-    mouse = libtcod.Mouse()
 
-    game_state = GameStates.PLAYERS_TURN
-    previous_game_state = game_state
+def try_pick_up(player):
+    for object in player.current_map.objects:
+        if object.x == player.x and object.y == player.y and object.item:
+            return actions.pick_up(player, object)
+    return False
 
-    targeting_item = None
 
-    while not libtcod.console_is_window_closed():
-        libtcod.sys_check_for_event(libtcod.EVENT_KEY_PRESS | libtcod.EVENT_MOUSE, key, mouse)
+def try_drop(player):
+    chosen_item = inventory_menu(
+        player,
+        'Press the key next to an item to drop it, x to examine, or any other to cancel.\n')
+    if chosen_item is not None:
+        actions.drop(player, chosen_item.owner)
+        return True
+    return False
 
-        if fov_recompute:
-            recompute_fov(fov_map, player.x, player.y, constants['fov_radius'], constants['fov_light_walls'],
-                          constants['fov_algorithm'])
 
-        render_all(con, panel, entities, player, game_map, fov_map, fov_recompute, message_log,
-                   constants['screen_width'], constants['screen_height'], constants['bar_width'],
-                   constants['panel_height'], constants['panel_y'], constants['colours'], game_state)
+def try_use(player):
+    chosen_item = inventory_menu(
+        player,
+        'Press the key next to an item to use it, x to examine, or any other to cancel.\n')
+    if chosen_item is not None:
+        actions.use(player, chosen_item.owner)
+        return True
+    return False
 
-        fov_recompute = False
-        libtcod.console_flush()
-        clear_all(con, entities)
 
-        action = handle_keys(key, game_state)
-        mouse_action = handle_mouse(mouse)
+def player_move_or_attack(player, direction, try_running):
+    """
+    Returns true if the player makes an attack or moves successfully;
+    false if the attempt to move fails.
+    """
+    goal = player.pos + direction
+    if (goal.x < 0 or goal.y < 0 or
+            goal.x >= player.current_map.width or
+            goal.y >= player.current_map.height):
+        log.message(player.current_map.out_of_bounds(goal))
+        return False
 
-        move = action.get('move')
-        wait = action.get('wait')
-        pickup = action.get('pickup')
-        show_inventory = action.get('show_inventory')
-        drop_inventory = action.get('drop_inventory')
-        look = action.get('look')
-        inventory_index = action.get('inventory_index')
-        take_stairs = action.get('take_stairs')
-        level_up = action.get('level_up')
-        show_character_screen = action.get('show_character_screen')
-        exit = action.get('exit')
-        fullscreen = action.get('fullscreen')
+    # Is there an attackable object?
+    target = None
+    for object in player.current_map.objects:
+        if object.fighter and object.pos == goal:
+            target = object
+            break
 
-        left_click = mouse_action.get('left_click')
-        right_click = mouse_action.get('right_click')
+    if target is not None:
+        actions.attack(player.fighter, target)
+        return True
+    else:
+        if actions.move(player, direction):
+            player.current_map.fov_needs_recompute = True
+            if try_running:
+                player.game_state = 'running'
+                player.run_direction = direction
+            return True
 
-        player_turn_results = []
+    return False
 
-        if move and game_state == GameStates.PLAYERS_TURN:
-            dx, dy = move
-            destination_x = player.x + dx
-            destination_y = player.y + dy
 
-            if not game_map.is_blocked(destination_x, destination_y):
-                target = get_blocking_entities_at_location(entities, destination_x, destination_y)
+def inventory_menu(player, header):
+    """
+    Show a menu with each item of the inventory as an option.
+    """
+    if len(player.inventory) == 0:
+        renderer.menu(header, 'Inventory is empty.', INVENTORY_WIDTH)
+        return None
 
-                if target:
-                    attack_results = player.fighter.attack(target)
-                    player_turn_results.extend(attack_results)
-                else:
-                    player.move(dx, dy, game_map)
+    options = []
+    for obj in player.inventory:
+        text = obj.name
+        # Show additional information, in case it's equipped.
+        if obj.item.count > 1:
+            text = text + ' (x' + str(obj.item.count) + ')'
+        if obj.equipment and obj.equipment.is_equipped:
+            text = text + ' (on ' + obj.equipment.slot + ')'
+        options.append(text)
 
-                    fov_recompute = True
+    (char, index) = renderer.menu(header, options, INVENTORY_WIDTH)
 
-                game_state = GameStates.ENEMY_TURN
+    if index is not None:
+        return player.inventory[index].item
 
-        elif wait:
-            game_state = GameStates.ENEMY_TURN
+    if char == ord('x'):
+        (c2, i2) = renderer.menu('Press the key next to an item to examine it, or any other to cancel.\n', options, INVENTORY_WIDTH)
+        if i2 is not None and player.inventory[i2].item.description is not None:
+            # renderer.msgbox(player.inventory[i2].item.description)
+            log.message(player.inventory[i2].item.description)
 
-        elif pickup and game_state == GameStates.PLAYERS_TURN:
-            for entity in entities:
-                if entity.item and entity.x == player.x and entity.y == player.y:
-                    pickup_results = player.inventory.add_item(entity)
-                    player_turn_results.extend(pickup_results)
+    return None
 
-                    break
-            else:
-                message_log.add_message(Message('There is nothing here to pick up.', libtcod.yellow))
 
-        if show_inventory:
-            previous_game_state = game_state
-            game_state = GameStates.SHOW_INVENTORY
+def display_character_info(player):
+    level_up_xp = LEVEL_UP_BASE + player.level * LEVEL_UP_FACTOR
+    base_strength = player.fighter.base_strength
+    strength = player.fighter.strength
+    base_agility = player.fighter.base_agility
+    agility = player.fighter.agility
+    renderer.msgbox('Character Information\n\nLevel: ' + str(player.level) +
+                    '\nExperience: ' + str(player.fighter.xp) +
+                    '\nExperience to level up: ' + str(level_up_xp) +
+                    '\n\nMaximum HP: ' + str(player.fighter.max_hp) +
+                    '\nAttack: ' + str(strength) +
+                    ' (' + str(base_strength) + ' + ' + str(strength - base_strength) + ')'
+                    '\nAgility: ' + str(agility) +
+                    ' (' + str(base_agility) + ' + ' + str(agility - base_agility) + ')',
+                    CHARACTER_SCREEN_WIDTH)
 
-        if drop_inventory:
-            previous_game_state = game_state
-            game_state = GameStates.DROP_INVENTORY
 
-        if inventory_index is not None and previous_game_state != GameStates.PLAYER_DEAD and inventory_index < len(
-                player.inventory.items):
-            item = player.inventory.items[inventory_index]
+def display_help():
+    renderer.msgbox('numpad keys to move, or:\n' +
+                    '  h (west) j (south) k (north) l (east)\n' +
+                    '  y (nw) u (ne) b (sw) n (se) . (wait)\n' +
+                    '  shift-move to run\n' +
+                    'g/get, d/drop, c/character information\n' +
+                    'i/inventory, equip, or use item\n' +
+                    '</traverse stairs\n' +
+                    'control-p/scroll through old log messages\n',
+                    INVENTORY_WIDTH)
 
-            if game_state == GameStates.SHOW_INVENTORY:
-                player_turn_results.extend(player.inventory.use(item, entities=entities, fov_map=fov_map))
-            elif game_state == GameStates.DROP_INVENTORY:
-                player_turn_results.extend(player.inventory.drop_item(item))
 
-        if look:
-            previous_game_state = game_state
-            game_state = GameStates.LOOK
-
-        if take_stairs and game_state == GameStates.PLAYERS_TURN:
-            for entity in entities:
-                if entity.stairs and entity.x == player.x and entity.y == player.y:
-                    entities = game_map.next_floor(player, message_log, constants)
-                    fov_map = initialize_fov(game_map)
-                    fov_recompute = True
-                    libtcod.console_clear(con)
-
-                    break
-            else:
-                message_log.add_message(Message('There are no stairs here.', libtcod.yellow))
-
-        if level_up:
-            if level_up == 'hp':
-                player.fighter.base_max_hp += 20
-                player.fighter.hp += player.fighter.hp
-            elif level_up == 'str':
-                player.fighter.base_strength += 1
-            elif level_up == 'agi':
-                player.fighter.base_agility += 1
-
-            game_state = previous_game_state
-
-        if show_character_screen:
-            previous_game_state = game_state
-            game_state = GameStates.CHARACTER_SCREEN
-
-        if game_state == GameStates.TARGETING:
-            if left_click:
-                target_x, target_y = left_click
-
-                item_use_results = player.inventory.use(targeting_item, entities=entities, fov_map=fov_map,
-                                                        target_x=target_x, target_y=target_y)
-                player_turn_results.extend(item_use_results)
-            elif right_click:
-                player_turn_results.append({'targeting_cancelled': True})
-
-        if exit:
-            if game_state in (GameStates.SHOW_INVENTORY, GameStates.DROP_INVENTORY, GameStates.CHARACTER_SCREEN):
-                game_state = previous_game_state
-            elif game_state == GameStates.TARGETING:
-                player_turn_results.append({'targeting_cancelled': True})
-            else:
-                save_game(player, entities, game_map, message_log, game_state)
-
+def try_stairs(player):
+    for f in player.current_map.portals:
+        if f.pos == player.pos:
+            if f.destination is None:
+                f.destination = next_level(player, f)
+                # player.pos was changed by next_level()!
+                f.dest_position = player.pos
                 return True
-
-        if fullscreen:
-            libtcod.console_set_fullscreen(not libtcod.console_is_fullscreen())
-
-        for player_turn_result in player_turn_results:
-            message = player_turn_result.get('message')
-            dead_entity = player_turn_result.get('dead')
-            item_added = player_turn_result.get('item_added')
-            item_consumed = player_turn_result.get('consumed')
-            item_dropped = player_turn_result.get('item_dropped')
-            equip = player_turn_result.get('equip')
-            targeting = player_turn_result.get('targeting')
-            targeting_cancelled = player_turn_result.get('targeting_cancelled')
-            xp = player_turn_result.get('xp')
-
-            if message:
-                message_log.add_message(message)
-
-            if dead_entity:
-                if dead_entity == player:
-                    message, game_state = kill_player(dead_entity)
-                else:
-                    message = kill_monster(dead_entity, entities)
-
-                message_log.add_message(message)
-
-            if item_added:
-                entities.remove(item_added)
-
-                game_state = GameStates.ENEMY_TURN
-
-            if item_consumed:
-                game_state = GameStates.ENEMY_TURN
-
-            if item_dropped:
-                entities.append(item_dropped)
-
-                game_state = GameStates.ENEMY_TURN
-
-            if equip:
-                equip_results = player.equipment.toggle_equip(equip)
-
-                for equip_result in equip_results:
-                    equipped = equip_result.get('equipped')
-                    dequipped = equip_result.get('dequipped')
-
-                    if equipped:
-                        message_log.add_message(Message('You equipped the {0}'.format(equipped.name)))
-
-                    if dequipped:
-                        message_log.add_message(Message('You dequipped the {0}'.format(dequipped.name)))
-
-                game_state = GameStates.ENEMY_TURN
-
-            if targeting:
-                previous_game_state = GameStates.PLAYERS_TURN
-                game_state = GameStates.TARGETING
-
-                targeting_item = targeting
-
-                message_log.add_message(targeting_item.item.targeting_message)
-
-            if targeting_cancelled:
-                game_state = previous_game_state
-
-                message_log.add_message(Message('Targeting cancelled'))
-
-            if xp:
-                leveled_up = player.level.add_xp(xp)
-                message_log.add_message(Message('You gain {0} experience points.'.format(xp)))
-
-                if leveled_up:
-                    message_log.add_message(Message(
-                        'You level up! You are now level {0}'.format(
-                            player.level.current_level) + '!', libtcod.yellow))
-                    previous_game_state = game_state
-                    game_state = GameStates.LEVEL_UP
-
-        if game_state == GameStates.ENEMY_TURN:
-            # Ensure that errors do not arise with rendering when enemies move
-            render_all(con, panel, entities, player, game_map, fov_map, fov_recompute, message_log,
-                       constants['screen_width'], constants['screen_height'], constants['bar_width'],
-                       constants['panel_height'], constants['panel_y'], constants['colours'], game_state)
-            fov_recompute = True
-            libtcod.console_flush()
-            clear_all(con, entities)
-
-            for entity in entities:
-                if entity.ai:
-                    enemy_turn_results = entity.ai.take_turn(player, fov_map, game_map, entities)
-
-                    for enemy_turn_result in enemy_turn_results:
-                        message = enemy_turn_result.get('message')
-                        dead_entity = enemy_turn_result.get('dead')
-
-                        if message:
-                            message_log.add_message(message)
-
-                        if dead_entity:
-                            if dead_entity == player:
-                                message, game_state = kill_player(dead_entity)
-                            else:
-                                message = kill_monster(dead_entity, entities)
-
-                            message_log.add_message(message)
-
-                            if game_state == GameStates.PLAYER_DEAD:
-                                break
-
-                    if game_state == GameStates.PLAYER_DEAD:
-                        break
             else:
-                game_state = GameStates.PLAYERS_TURN
+                revisit_level(player, f)
+                return True
+    return False
+
+
+def _running_lookahead(player):
+    """
+    Returns true if the upcoming terrain doesn't match the current terrain,
+    or if there's an object in the upcoming space.
+    If the player stops running when true, they should stop in the doorway to
+    a room, or just before rounding a bend in a corridor or entering an
+    intersection.
+    """
+    map = player.current_map
+    dir = player.run_direction
+    if (map.terrain_at(player.pos) != map.terrain_at(player.pos + dir) or
+            (map.terrain_at(player.pos + dir.left.left) != map.terrain_at(player.pos + dir.left)) or
+            (map.terrain_at(player.pos + dir.right.right) != map.terrain_at(player.pos + dir.right))):
+        return True
+    for o in map.objects:
+        if (o.pos == player.pos + dir or
+                o.pos == player.pos + dir.left or
+                o.pos == player.pos + dir.right):
+            return True
+    return False
+
+
+def handle_keys(player, key):
+    """
+    Returns 'playing', 'didnt-take-turn', or 'exit'.
+    """
+    key_char = chr(key.c)
+
+    if key.vk == libtcod.KEY_F11:
+        # F11: toggle fullscreen
+        libtcod.console_set_fullscreen(not libtcod.console_is_fullscreen())
+
+    elif key.vk == libtcod.KEY_ESCAPE:
+        return 'exit'
+
+    elif key_char == 'p' and (key.lctrl or key.rctrl):
+        interface.log_display()
+
+    if player.game_state == 'running':
+
+        if (player.endangered or
+                key.vk != libtcod.KEY_NONE or
+                _running_lookahead(player) or
+                not player_move_or_attack(player, player.run_direction, False)):
+            player.game_state = 'playing'
+            return 'didnt-take-turn'
+
+    if player.game_state == 'playing':
+        # movement keys
+        (parsed, direction, shift) = interface.parse_move(key)
+        if parsed:
+            if direction:
+                player_move_or_attack(player, direction, shift)
+            else:
+                # Do nothing
+                pass
+        else:
+            if key_char == 'g':
+                try_pick_up(player)
+            if key_char == 'i':
+                # interface.debounce()
+                try_use(player)
+            if key_char == 'd':
+                # interface.debounce()
+                try_drop(player)
+            if key_char == 'c':
+                # interface.debounce()
+                display_character_info(player)
+            if key_char == '<':
+                try_stairs(player)
+            if key_char == '?' or key.vk == libtcod.KEY_F1:
+                display_help()
+
+            return 'didnt-take-turn'
+
+
+def check_level_up(player):
+    """
+    If the player has enough experience, level up immediately.
+    """
+    level_up_xp = LEVEL_UP_BASE + player.level * LEVEL_UP_FACTOR
+    if player.fighter.xp >= level_up_xp:
+        player.level += 1
+        player.fighter.xp -= level_up_xp
+        log.message('Your level up! Welcome to level ' + str(player.level) + '.', libtcod.yellow)
+
+        choice = None
+        while choice is None:
+            (char, choice) = renderer.menu(
+                'Level up! Choose a stat to raise:\n',
+                ['+20 HP, from ' + str(player.fighter.max_hp) + ')',
+                 '+1 Strength, from ' + str(player.fighter.power) + ')',
+                 '+1 Agility, from ' + str(player.fighter.defense) + ')'],
+                LEVEL_SCREEN_WIDTH)
+
+        if choice == 0:
+            player.fighter.base_max_hp += 20
+            player.fighter.hp += 20
+        elif choice == 1:
+            player.fighter.base_strength += 1
+        elif choice == 2:
+            player.fighter.base_agility += 1
+
+
+def player_death(player):
+    """
+    End the game!
+    """
+    log.message('You did not survive.', libtcod.red)
+    player.game_state = 'dead'
+
+    # For added effect, transform the player into a corpse!
+    player.char = '%'
+    player.color = libtcod.dark_red
+
+
+def save_game(player):
+    """
+    Save the game to file "savegame";
+    overwrites any existing data.
+    """
+    file = shelve.open('savegame', 'n')
+    file['current_map'] = player.current_map
+    file['player_index'] = player.current_map.objects.index(player)
+    file['game_msgs'] = log.game_msgs
+    file.close()
+
+
+def load_game():
+    """
+    Loads from "savegame".
+    Returns the player object.
+    """
+    file = shelve.open('savegame', 'r')
+    current_map = file['current_map']
+    player = current_map.objects[file['player_index']]
+    log.game_msgs = file['game_msgs']
+    file.close()
+
+    current_map.initialize_fov()
+
+    return player
+
+
+def new_game():
+    """
+    Starts a new game, with a default player on level 1 of the dungeon.
+    Returns the player object.
+    """
+    # Must initialize the log before we do anything that might emit a message.
+    log.init()
+
+    fighter_component = Fighter(hp=100, xp=0, death_function=player_death,
+                                damage_dice=1, damage_sides=2,
+                                strength=1, agility=1, vitality=1, intellect=1, perception=1)
+    player = Object(algebra.Location(0, 0), '@', 'player', libtcod.white, blocks=True, fighter=fighter_component)
+    player.inventory = []
+    player.level = 1
+    player.game_state = 'playing'
+    # True if there's a (hostile) fighter in FOV
+    player.endangered = False
+
+    obj = items.dagger()
+    player.inventory.append(obj)
+    actions.equip(player, obj.equipment, False)
+    obj.always_visible = True
+
+    cartographer.make_map(player, 1)
+    renderer.clear_console()
+    renderer.update_camera(player)
+
+    log.message('Welcome to the SludgeWorks. Adapt or be adapted.', libtcod.red)
+    log.message('Press ? or F1 for help.')
+
+    return player
+
+
+def next_level(player, portal):
+    """
+    Advance to the next level (changing player.current_map).
+    Heals the player 50%.
+    Returns the Map of the new level.
+    """
+    log.message('You take a moment to rest, and recover your strength.', libtcod.light_violet)
+    actions.heal(player.fighter, player.fighter.max_hp / 2)
+
+    log.message('Determined to reach the final chamber, you descend further into the SludgeWorks.', libtcod.red)
+    if randint(1, 2) == 1:
+        log.message('You feel a terrible sense of dread.', libtcod.darkest_red)
+    old_map = player.current_map
+    cartographer.make_map(player, player.current_map.dungeon_level + 1)
+    renderer.clear_console()
+    renderer.update_camera(player)
+
+    # Create the up stairs at the current position.
+    stairs = Object(player.pos, '>', 'stairs up', libtcod.white, always_visible=True)
+    stairs.destination = old_map
+    stairs.dest_position = portal.pos
+    player.current_map.objects.insert(0, stairs)
+    player.current_map.portals.insert(0, stairs)
+
+    return player.current_map
+
+
+def revisit_level(player, portal):
+    """
+    Return to a level the player has previously visited (changing player.current_map).
+    Does *not* heal the player.
+    """
+    player.current_map = portal.destination
+    player.pos = portal.dest_position
+    # Call to initialize_fov() should be redundant but in practice seems to have
+    # worked around an intermittent bug.
+    player.current_map.initialize_fov()
+    player.current_map.fov_needs_recompute = True
+    renderer.update_camera(player)
+    renderer.clear_console()
+
+
+def process_visible_objects(player):
+    """
+    We will show the object if it's visible to the player
+    or it's set to "always visible" and on an explored tile.
+    If we're showing a hostile monster, set player.endangered.
+    """
+    player.endangered = False
+    visible_objects = []
+    for o in player.current_map.objects:
+        if o == player:
+            continue
+        if (libtcod.map_is_in_fov(player.current_map.fov_map, o.x, o.y) or
+                (o.always_visible and
+                 player.current_map.is_explored(o.pos))):
+            visible_objects.append(o)
+            if o.fighter:
+                player.endangered = True
+    return visible_objects
+
+
+def play_game(player):
+    """
+    Main loop.
+    """
+    player_action = None
+
+    while not libtcod.console_is_window_closed():
+        (key, mouse) = interface.poll()
+        player.visible_objects = process_visible_objects(player)
+        renderer.render_all(player, (mouse.cx, mouse.cy))
+        player.current_map.fov_needs_recompute = False
+
+        libtcod.console_flush()
+
+        check_level_up(player)
+
+        # Erase all objects at their old locations, before they move.
+        for object in player.current_map.objects:
+            renderer.clear_object(player, object)
+
+        player_action = handle_keys(player, key)
+        if player_action == 'exit':
+            save_game(player)
+            break
+
+        if (player_action != 'didnt-take-turn' and
+            (player.game_state == 'playing' or
+             player.game_state == 'running')):
+            for object in player.current_map.objects:
+                if object.ai:
+                    object.ai.take_turn(player)
 
 
 if __name__ == '__main__':
-    main()
+    renderer.renderer_init()
+    # cProfile.run('renderer.main_menu(new_game, play_game, load_game)')
+    renderer.main_menu(new_game, play_game, load_game)
