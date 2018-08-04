@@ -4,11 +4,9 @@ Could be folded into actions.py.
 """
 import libtcodpy as libtcod
 
-import log
-from components import *
-import actions
-import ai
-import interface
+from game_messages import Message
+from ai import ConfusedMonster
+
 
 HEAL_AMOUNT = 40
 LIGHTNING_DAMAGE = 40
@@ -18,94 +16,92 @@ FIREBALL_RADIUS = 3
 FIREBALL_DAMAGE = 25
 
 
-def _target_monster(actor, max_range=None):
-    """
-    Returns a clicked monster inside FOV up to a range,
-    or None if right-clicked.
-    """
-    while True:
-        pos = interface.target_tile(actor, max_range)
-        if pos is None:
-            return None
+def cast_heal(*args, **kwargs):
+    entity = args[0]
+    amount = kwargs.get('amount')
+    results = []
 
-        for obj in actor.current_map.objects:
-            if (obj.x == pos.x and obj.y == pos.y and obj.fighter and
-                    obj != actor):
-                return obj
+    if entity.fighter.hp == entity.fighter.max_hp:
+        results.append({'consumed': False, 'message': Message('You are already at full health', libtcod.yellow)})
+    else:
+        entity.fighter.heal(amount)
+        results.append({'consumed': True, 'message': Message('Your wounds start to feel better!', libtcod.green)})
+    return results
 
 
-def _closest_monster(actor, max_range):
-    """
-    Find closest enemy in the player's FOV, up to a maximum range.
-    """
-    closest_enemy = None
-    closest_dist = max_range + 1
+def cast_lightning(*args, **kwargs):
+    caster = args[0]
+    entities = kwargs.get('entities')
+    fov_map = kwargs.get('fov_map')
+    damage = kwargs.get('damage')
+    maximum_range = kwargs.get('maximum_range')
+    results = []
 
-    for object in actor.current_map.objects:
-        if (object.fighter and not object == actor and
-                libtcod.map_is_in_fov(actor.current_map.fov_map,
-                                      object.x, object.y)):
-            dist = actor.distance_to(object)
-            if dist < closest_dist:
-                closest_enemy = object
-                closest_dist = dist
-    return closest_enemy
+    target = None
+    closest_distance = maximum_range + 1
+    for entity in entities:
+        if entity.fighter and entity != caster and libtcod.map_is_in_fov(fov_map, entity.x, entity.y):
+            distance = caster.distance_to(entity)
 
-
-def cast_heal(actor):
-    """
-    Heal the caster.
-    """
-    if actor.fighter.hp == actor.fighter.max_hp:
-        log.message('You are already at full health.', libtcod.red)
-        return 'cancelled'
-
-    log.message('Your wounds start to feel better!', libtcod.light_violet)
-    actions.heal(actor.fighter, HEAL_AMOUNT)
+            if distance < closest_distance:
+                target = entity
+                closest_distance = distance
+    if target:
+        results.append({'consumed': True, 'target': target, 'message': Message('A lighting bolt strikes the {0} ' +
+                        'with a loud thunder, dealing {1} damage!'.format(target.name, damage))})
+        results.extend(target.fighter.take_damage(damage))
+    else:
+        results.append({'consumed': False, 'target': None, 'message': Message('No enemy is close enough to strike.',
+                                                                              libtcod.red)})
+    return results
 
 
-def cast_lightning(actor):
-    """
-    Find closest enemy (inside a maximum range) and damage it.
-    """
-    monster = _closest_monster(actor, LIGHTNING_RANGE)
-    if monster is None:
-        log.message('No enemy is close enough to strike.', libtcod.red)
-        return 'cancelled'
+def cast_fireball(*args, **kwargs):
+    entities = kwargs.get('entities')
+    fov_map = kwargs.get('fov_map')
+    damage = kwargs.get('damage')
+    radius = kwargs.get('radius')
+    target_x = kwargs.get('target_x')
+    target_y = kwargs.get('target_y')
+    results = []
 
-    log.message('A lighting bolt strikes the ' + monster.name +
-                ' with a loud thunder! The damage is ' +
-                str(LIGHTNING_DAMAGE) + ' hit points.', libtcod.light_blue)
-    actions.inflict_damage(actor, monster.fighter, LIGHTNING_DAMAGE)
+    if not libtcod.map_is_in_fov(fov_map, target_x, target_y):
+        results.append({'consumed': False, 'message': Message('You cannot target a tile outside your field of view.', +
+                        libtcod.yellow)})
+        return results
 
-
-def cast_fireball(actor):
-    log.message('Left-click a target tile for the fireball, '
-                'or right-click to cancel.', libtcod.light_cyan)
-    pos = interface.target_tile(actor)
-    if pos is None:
-        return 'cancelled'
-    log.message('The fireball explodes, burning everything within ' +
-                str(FIREBALL_RADIUS) + ' tiles!', libtcod.orange)
-
-    for obj in actor.current_map.objects:
-        if obj.distance(pos) <= FIREBALL_RADIUS and obj.fighter:
-            log.message('The ' + obj.name + ' gets burned for ' +
-                        str(FIREBALL_DAMAGE) + ' hit points.',
-                        libtcod.orange)
-            actions.inflict_damage(actor, obj.fighter, FIREBALL_DAMAGE)
+    results.append({'consumed': True, 'message': Message('The fireball explodes, burning everything within {0} ' +
+                                                         'tiles!'.format(radius), libtcod.orange)})
+    for entity in entities:
+        if entity.distance(target_x, target_y) <= radius and entity.fighter:
+            results.append({'message': Message('The {0} gets burned for {1} damage!'.format(entity.name, damage), +
+                            libtcod.orange)})
+            results.extend(entity.fighter.take_damage(damage))
+    return results
 
 
-def cast_confuse(actor):
-    log.message('Left-click an enemy to confuse it, or right-click to cancel.',
-                libtcod.light_cyan)
-    monster = _target_monster(actor, CONFUSE_RANGE)
-    if monster is None:
-        return 'cancelled'
+def cast_confuse(*args, **kwargs):
+    entities = kwargs.get('entities')
+    fov_map = kwargs.get('fov_map')
+    target_x = kwargs.get('target_x')
+    target_y = kwargs.get('target_y')
+    results = []
 
-    old_ai = monster.ai
-    monster.ai = AI(ai.confused_monster, ai.confused_monster_metadata(old_ai))
-    monster.ai.set_owner(monster)
-    log.message('The eyes of the ' + monster.name +
-                ' look vacant, as he starts to stumble around!',
-    libtcod.light_green)
+    if not libtcod.map_is_in_fov(fov_map, target_x, target_y):
+        results.append({'consumed': False, 'message': Message('You cannot target a tile outside your field of view.', libtcod.yellow)})
+        return results
+    for entity in entities:
+        if entity.x == target_x and entity.y == target_y and entity.ai:
+            confused_ai = ConfusedMonster(entity.ai, 10)
+
+            confused_ai.owner = entity
+            entity.ai = confused_ai
+
+            results.append({'consumed': True, 'message': Message('The eyes of the {0} look vacant and they ' +
+                                                                 'begin to stumble around!'.format(entity.name),
+                                                                 libtcod.light_green)})
+            break
+    else:
+        results.append({'consumed': False, 'message': Message('There is no targetable enemy at that location.', +
+                        libtcod.yellow)})
+    return results

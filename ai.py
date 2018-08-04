@@ -1,78 +1,63 @@
-"""
-AI routines, AI data, and monster death.
-"""
 import libtcodpy as libtcod
 
-import log
-from components import *
+from random import randint
+
+from game_messages import Message
 import actions
 
-# Might make sense to have this defined
-# in spells.py instead, dropping the
-# default argument?
-CONFUSE_NUM_TURNS = 10
+
+class Aggressive:
+    def take_turn(self, target, fov_map, game_map, entities):
+        results = []
+
+        monster = self.owner
+        if libtcod.map_is_in_fov(fov_map, monster.x, monster.y):
+
+            if monster.distance_to(target) >= 2:
+                actions.move_astar(monster, target, entities, game_map)
+
+            elif target.fighter.hp > 0:
+                attack_results = actions.attack(monster, target)
+                results.extend(attack_results)
+
+        return results
 
 
-class BasicMonsterMetadata:
-    def __init__(self, target):
-        self.target = target
+class Stationary:
+    # Monster which does not move, but attacks when enemies are in range
+    def take_turn(self, target, fov_map, game_map, entities):
+        results = []
+
+        monster = self.owner
+        if libtcod.map_is_in_fov(fov_map, monster.x, monster.y):
+            if (target.fighter.hp > 0) and (monster.distance_to(target) == 1):
+                attack_results = actions.attack(monster, target)
+                results.extend(attack_results)
+
+        return results
 
 
-def aggressive(monster, player, metadata):
-    """
-    A basic monster takes its turn. if you can see it, it can see you.
-    """
-    if libtcod.map_is_in_fov(monster.current_map.fov_map,
-                             monster.x, monster.y):
-        if monster.distance_to(metadata.target) >= 2:
-            actions.move_towards(monster, metadata.target.pos)
-        elif metadata.target.fighter.hp > 0:
-            actions.attack(monster.fighter, metadata.target)
+class ConfusedMonster:
+    def __init__(self, previous_ai, number_of_turns=10):
+        self.previous_ai = previous_ai
+        self.number_of_turns = number_of_turns
+
+    def take_turn(self, target, fov_map, game_map, entities):
+        results = []
+
+        if self.number_of_turns > 0:
+            random_x = self.owner.x + randint(0, 2) - 1
+            random_y = self.owner.y + randint(0, 2) - 1
+
+            if random_x != self.owner.x and random_y != self.owner.y:
+                self.owner.move_towards(random_x, random_y, game_map, entities)
+
+            self.number_of_turns -= 1
+        else:
+            self.owner.ai = self.previous_ai
+            results.append({'message': Message('The {0} is no longer confused!'.format(self.owner.name), libtcod.red)})
+
+        return results
 
 
-def stationary(monster, player, metadata):
-    """
-    Monster which does not move, but attacks when enemies are in range
-    """
-    if libtcod.map_is_in_fov(monster.current_map.fov_map,
-                             monster.x, monster.y):
-        if (metadata.target.fighter.hp > 0) and (monster.distance_to(metadata.target) == 1):
-            actions.attack(monster.fighter, metadata.target)
 
-
-class ConfusedMonsterMetadata:
-    def __init__(self, old_ai, num_turns=CONFUSE_NUM_TURNS):
-        self.old_ai = old_ai
-        self.num_turns = num_turns
-
-
-def random_direction():
-    return algebra.directions[libtcod.random_get_int(0, 0, 7)]
-
-
-def confused_monster(monster, player, metadata):
-    if metadata.num_turns > 0:
-        actions.move(monster, random_direction())
-        metadata.num_turns -= 1
-    else:
-        # Restore the previous AI (this one will be deleted
-        # because it's not referenced anymore)
-        monster.ai = metadata.old_ai
-        log.message(monster.name.capitalize() +
-                    ' is no longer confused!', libtcod.red)
-
-
-def monster_death(monster):
-    # Transform it into a nasty corpse! it doesn't block, can't be
-    # attacked, and doesn't move.
-    log.message(
-        'The ' + monster.name + ' dies! You gain ' +
-        str(monster.fighter.xp) + ' experience points.', libtcod.orange)
-    monster.char = '%'
-    monster.color = libtcod.dark_red
-    monster.blocks = False
-    monster.fighter = None
-    monster.ai = None
-    monster.name = monster.name + ' remains.'
-    monster.current_map.objects.remove(monster)
-    monster.current_map.objects.insert(0, monster)

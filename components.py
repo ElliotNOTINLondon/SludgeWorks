@@ -2,64 +2,11 @@
 Simple entity system: any renderable Object can have
 a number of Components attached.
 """
+
 import math
+from random import randint
 
-
-class Object:
-    """
-    This is a generic object: the player, a monster, an item, the stairs...
-    It's always represented by a character on screen.
-    """
-    def __init__(self, pos, char, name, color,
-                 blocks=False, always_visible=False,
-                 fighter=None, ai=None, item=None, equipment=None):
-        self.pos = pos
-        self.char = char
-        self.name = name
-        self.color = color
-        self.blocks = blocks
-        self.always_visible = always_visible
-
-        self.fighter = fighter
-        self._ensure_ownership(fighter)
-        self.ai = ai
-        self._ensure_ownership(ai)
-        self.item = item
-        self._ensure_ownership(item)
-        self.equipment = equipment
-        self._ensure_ownership(equipment)
-
-    @property
-    def x(self):
-        return self.pos.x
-
-    @property
-    def y(self):
-        return self.pos.y
-
-    def _ensure_ownership(self, component):
-        if (component):
-            component.set_owner(self)
-
-    def distance_to(self, other):
-        """
-        Return the distance to another object.
-        """
-        dx = other.x - self.x
-        dy = other.y - self.y
-        return math.sqrt(dx ** 2 + dy ** 2)
-
-    def distance(self, x, y):
-        """
-        Return the distance to some coordinates.
-        """
-        return math.sqrt((x - self.x) ** 2 + (y - self.y) ** 2)
-
-    def distance(self, pos):
-        """
-        Return the distance to some coordinates.
-        """
-        return math.sqrt((pos.x - self.x) ** 2 + (pos.y - self.y) ** 2)
+from render_functions import RenderOrder
 
 
 class Component:
@@ -70,13 +17,58 @@ class Component:
         self.owner = entity
 
 
+class Object:
+    """
+    This is a generic object: the player, a monster, an item, the stairs...
+    It's always represented by a character on screen.
+    """
+    def __init__(self, x, y, char, name, colour,
+                 blocks=False, render_order=RenderOrder.ACTOR, stairs=None,
+                 fighter=None, ai=None, item=None, inventory=None, equipment=None, equippable=None):
+        self.x = x
+        self.y = y
+        self.char = char
+        self.name = name
+        self.colour = colour
+        self.blocks = blocks
+        self.render_order = render_order
+        self.stairs = stairs
+
+        self.fighter = fighter
+        self._ensure_ownership(fighter)
+        self.ai = ai
+        self.item = item
+        self._ensure_ownership(item)
+        self.inventory = inventory
+        self.equipment = equipment
+        self._ensure_ownership(equipment)
+        self.equippable = equippable
+
+        if self.ai:
+            self.ai.owner = self
+        if self.inventory:
+            self.inventory.owner = self
+
+    def _ensure_ownership(self, component):
+        if component:
+            component.set_owner(self)
+
+    def distance(self, x, y):
+        return math.sqrt((x - self.x) ** 2 + (y - self.y) ** 2)
+
+    def distance_to(self, other):
+        dx = other.x - self.x
+        dy = other.y - self.y
+        return math.sqrt(dx ** 2 + dy ** 2)
+
+
 class Fighter(Component):
     """
     Combat-related properties and methods (monster, player, NPC).
     """
     def __init__(self, hp, xp,
                  damage_dice, damage_sides,
-                 strength, agility, vitality, intellect, perception, death_function=None,):
+                 strength, agility, vitality, intellect, perception, death_function=None):
         self.base_max_hp = hp
         self.hp = hp
         self.xp = xp
@@ -94,6 +86,16 @@ class Fighter(Component):
         bonus = sum(equipment.max_hp_bonus for equipment
                     in _get_all_equipped(self.owner))
         return self.base_max_hp + bonus
+
+    @property
+    def damage(self):
+        if self.owner and self.owner.equipment:
+            damage = randint(self.owner.equipment.damage_dice,
+                             self.owner.equipment.damage_dice*self.owner.equipment.damage_sides)
+        else:
+            damage = randint(self.base_damage_dice, self.base_damage_dice*self.base_damage_sides)
+
+        return damage
 
     @property
     def strength(self):
@@ -124,6 +126,29 @@ class Fighter(Component):
         bonus = sum(equipment.perception_bonus for equipment
                     in _get_all_equipped(self.owner))
         return self.base_perception + bonus
+
+
+class Level:
+    def __init__(self, current_level=1, current_xp=0, level_up_base=100, level_up_factor=150):
+        self.current_level = current_level
+        self.current_xp = current_xp
+        self.level_up_base = level_up_base
+        self.level_up_factor = level_up_factor
+
+    @property
+    def experience_to_next_level(self):
+        return self.level_up_base + self.current_level * self.level_up_factor
+
+    def add_xp(self, xp):
+        self.current_xp += xp
+
+        if self.current_xp > self.experience_to_next_level:
+            self.current_xp -= self.experience_to_next_level
+            self.current_level += 1
+
+            return True
+        else:
+            return False
 
 
 class Item(Component):
@@ -169,15 +194,6 @@ class Equipment(Component):
         if entity.item is None:
             entity.item = Item()
             entity.item.set_owner(entity)
-
-
-class AI(Component):
-    def __init__(self, take_turn, metadata=None):
-        self._turn_function = take_turn
-        self._metadata = metadata
-
-    def take_turn(self, player):
-        self._turn_function(self.owner, player, self._metadata)
 
 
 def _get_all_equipped(obj):

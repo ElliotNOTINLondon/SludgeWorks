@@ -1,4 +1,3 @@
-
 import math
 
 
@@ -19,8 +18,10 @@ class Rect(object):
                 self.y2 == other.y2)
 
     def center(self):
-        return Location(round((self.x1 + self.x2) / 2),
-                        round((self.y1 + self.y2) / 2))
+        center_x = round((self.x1 + self.x2) / 2)
+        center_y = round((self.y1 + self.y2) / 2)
+
+        return center_x, center_y
 
     def intersect(self, other):
         """
