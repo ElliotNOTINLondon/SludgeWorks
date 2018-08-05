@@ -1,51 +1,26 @@
 import libtcodpy as libtcod
 
-import actions
+from death_functions import kill_monster, kill_player
 from entity import get_blocking_entities_at_location
 from fov_functions import initialize_fov, recompute_fov
 from game_messages import Message
 from game_states import GameStates
 from input_handlers import handle_keys, handle_mouse, handle_main_menu
-from initialise_new_game import get_constants, get_game_variables
-from data_loaders import load_game, save_game
-from menus import main_menu, inventory_menu, message_box
+from loader_functions.initialise_new_game import get_constants, get_game_variables
+from loader_functions.data_loaders import load_game, save_game
+from menus import main_menu, message_box
 from render_functions import clear_all, render_all
 
 
-def try_pick_up(player):
-    for obj in player.current_map.objects:
-        if obj.x == player.x and obj.y == player.y and obj.item:
-            return actions.pick_up(player, obj)
-    return False
-
-
-def try_drop(player):
-    chosen_item = inventory_menu(
-        player,
-        'Press the key next to an item to drop it, x to examine, or any other to cancel.\n')
-    if chosen_item is not None:
-        actions.drop(player, chosen_item.owner)
-        return True
-    return False
-
-
-def try_use(player):
-    chosen_item = inventory_menu(
-        player,
-        'Press the key next to an item to use it, x to examine, or any other to cancel.\n')
-    if chosen_item is not None:
-        actions.use(player, chosen_item.owner)
-        return True
-    return False
-
-
 def main():
+    libtcod.sys_set_fps(60)
     constants = get_constants()
 
     libtcod.console_set_custom_font('terminal8x8_gs_ro.png',
                                     libtcod.FONT_TYPE_GREYSCALE | libtcod.FONT_LAYOUT_ASCII_INROW)
 
     libtcod.console_init_root(constants['screen_width'], constants['screen_height'], constants['window_title'], False)
+
     con = libtcod.console_new(constants['screen_width'], constants['screen_height'])
     panel = libtcod.console_new(constants['screen_width'], constants['panel_height'])
 
@@ -58,7 +33,7 @@ def main():
     show_main_menu = True
     show_load_error_message = False
 
-    main_menu_background_image = libtcod.image_load('menu_background.png')
+    main_menu_background_image = libtcod.image_load('sludge2.png')
 
     key = libtcod.Key()
     mouse = libtcod.Mouse()
@@ -145,7 +120,10 @@ def play_game(player, entities, game_map, message_log, game_state, con, panel, c
         take_stairs = action.get('take_stairs')
         level_up = action.get('level_up')
         show_character_screen = action.get('show_character_screen')
+        esc_menu = action.get('esc_menu')
+        help = action.get('help')
         exit = action.get('exit')
+        quit = action.get('quit')
         fullscreen = action.get('fullscreen')
 
         left_click = mouse_action.get('left_click')
@@ -162,10 +140,10 @@ def play_game(player, entities, game_map, message_log, game_state, con, panel, c
                 target = get_blocking_entities_at_location(entities, destination_x, destination_y)
 
                 if target:
-                    attack_results = actions.attack(player, target)
+                    attack_results = player.fighter.attack(target)
                     player_turn_results.extend(attack_results)
                 else:
-                    actions.move(player, dx, dy, game_map)
+                    player.move(dx, dy, game_map)
 
                     fov_recompute = True
 
@@ -177,7 +155,7 @@ def play_game(player, entities, game_map, message_log, game_state, con, panel, c
         elif pickup and game_state == GameStates.PLAYERS_TURN:
             for entity in entities:
                 if entity.item and entity.x == player.x and entity.y == player.y:
-                    pickup_results = player.inventory.append(entity)
+                    pickup_results = player.inventory.add_item(entity)
                     player_turn_results.extend(pickup_results)
 
                     break
@@ -193,8 +171,8 @@ def play_game(player, entities, game_map, message_log, game_state, con, panel, c
             game_state = GameStates.DROP_INVENTORY
 
         if inventory_index is not None and previous_game_state != GameStates.PLAYER_DEAD and inventory_index < len(
-                player.inventory):
-            item = player.inventory[inventory_index]
+                player.inventory.items):
+            item = player.inventory.items[inventory_index]
 
             if game_state == GameStates.SHOW_INVENTORY:
                 player_turn_results.extend(player.inventory.use(item, entities=entities, fov_map=fov_map))
@@ -208,7 +186,7 @@ def play_game(player, entities, game_map, message_log, game_state, con, panel, c
         if take_stairs and game_state == GameStates.PLAYERS_TURN:
             for entity in entities:
                 if entity.stairs and entity.x == player.x and entity.y == player.y:
-                    entities = game_map.next_floor(player, message_log, constants)
+                    entities = game_map.next_floor(player, constants)
                     fov_map = initialize_fov(game_map)
                     fov_recompute = True
                     libtcod.console_clear(con)
@@ -242,15 +220,23 @@ def play_game(player, entities, game_map, message_log, game_state, con, panel, c
             elif right_click:
                 player_turn_results.append({'targeting_cancelled': True})
 
-        if exit:
-            if game_state in (GameStates.SHOW_INVENTORY, GameStates.DROP_INVENTORY, GameStates.CHARACTER_SCREEN):
-                game_state = previous_game_state
-            elif game_state == GameStates.TARGETING:
-                player_turn_results.append({'targeting_cancelled': True})
-            else:
-                save_game(player, entities, game_map, message_log, game_state)
+        if esc_menu:
+            previous_game_state = game_state
+            game_state = GameStates.ESC_MENU
 
+        if help:
+            game_state = GameStates.HELP_MENU
+
+        if exit:
+            if game_state == GameStates.TARGETING:
+                player_turn_results.append({'targeting_cancelled': True})
                 return True
+            else:
+                game_state = previous_game_state
+
+        if quit:
+            save_game(player, entities, game_map, message_log, game_state)
+            return True
 
         if fullscreen:
             libtcod.console_set_fullscreen(not libtcod.console_is_fullscreen())
@@ -271,9 +257,9 @@ def play_game(player, entities, game_map, message_log, game_state, con, panel, c
 
             if dead_entity:
                 if dead_entity == player:
-                    message, game_state = kill_player(player)
+                    message, game_state = kill_player(dead_entity)
                 else:
-                    message = actions.kill_monster(dead_entity, entities)
+                    message = kill_monster(dead_entity, entities)
 
                 message_log.add_message(message)
 
@@ -353,7 +339,7 @@ def play_game(player, entities, game_map, message_log, game_state, con, panel, c
                             if dead_entity == player:
                                 message, game_state = kill_player(dead_entity)
                             else:
-                                message = actions.kill_monster(dead_entity, entities)
+                                message = kill_monster(dead_entity, entities)
 
                             message_log.add_message(message)
 
@@ -364,13 +350,6 @@ def play_game(player, entities, game_map, message_log, game_state, con, panel, c
                         break
             else:
                 game_state = GameStates.PLAYERS_TURN
-
-
-def kill_player(player):
-    player.char = '%'
-    player.colour = libtcod.dark_red
-
-    return Message('You did not survive.', libtcod.red), GameStates.PLAYER_DEAD
 
 
 if __name__ == '__main__':

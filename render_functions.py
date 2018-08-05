@@ -3,7 +3,7 @@ import libtcodpy as libtcod
 from enum import Enum, auto
 
 from game_states import GameStates
-from menus import inventory_menu, level_up_menu, character_screen
+from menus import *
 
 
 class RenderOrder(Enum):
@@ -58,6 +58,7 @@ def render_all(con, panel, entities, player, game_map, fov_map, fov_recompute, m
                 wall = game_map.tiles[x][y].block_sight
 
                 if visible:
+                    # TODO: make it so that multiple tile chars can be used for floors, i.e. ',', '.', '`', ' '
                     if wall:
                         libtcod.console_put_char_ex(con, x, y, ord('▓'.encode('cp437')), colours.get('light_wall'),
                                                     colours.get('dark_ground'))
@@ -121,6 +122,12 @@ def render_all(con, panel, entities, player, game_map, fov_map, fov_recompute, m
     elif game_state == GameStates.CHARACTER_SCREEN:
         character_screen(player, 30, 10, screen_width, screen_height)
 
+    elif game_state == GameStates.ESC_MENU:
+        esc_menu(colours, 40, 10, screen_width, screen_height)
+
+    elif game_state == GameStates.HELP_MENU:
+        help_menu(50, 10, screen_width, screen_height)
+
 
 def clear_all(con, entities):
     for entity in entities:
@@ -128,10 +135,11 @@ def clear_all(con, entities):
 
 
 def draw_entity(con, entity, fov_map, game_map):
-    if libtcod.map_is_in_fov(fov_map, entity.x, entity.y) or game_map.tiles[entity.x][entity.y].explored:
+    if libtcod.map_is_in_fov(fov_map, entity.x, entity.y) or (entity.stairs and game_map.tiles[entity.x][entity.y].explored):
         libtcod.console_set_default_foreground(con, entity.colour)
         libtcod.console_put_char(con, entity.x, entity.y, entity.char, libtcod.BKGND_NONE)
 
 
 def clear_entity(con, entity):
+    # erase the character that represents this object
     libtcod.console_put_char(con, entity.x, entity.y, ' ', libtcod.BKGND_NONE)

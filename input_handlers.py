@@ -18,6 +18,10 @@ def handle_keys(key, game_state):
         return handle_level_up_menu(key)
     elif game_state == GameStates.CHARACTER_SCREEN:
         return handle_character_screen(key)
+    elif game_state == GameStates.ESC_MENU:
+        return handle_esc_menu_keys(key)
+    elif game_state == GameStates.HELP_MENU:
+        return handle_help_menu_keys(key)
 
     return {}
 
@@ -71,7 +75,7 @@ def handle_player_turn_keys(key):
         return {'fullscreen': True}
     elif key.vk == libtcod.KEY_ESCAPE:
         # Exit the game
-        return {'exit': True}
+        return {'esc_menu': True}
 
     # No key was pressed
     return {}
@@ -98,21 +102,21 @@ def handle_look_screen_keys(key):
     key_char = chr(key.c)
 
     if key.vk == libtcod.KEY_UP or key_char == 'k':
-        return {'move': (0, -1)}
+        return {'look': (0, -1)}
     elif key.vk == libtcod.KEY_DOWN or key_char == 'j':
-        return {'move': (0, 1)}
+        return {'look': (0, 1)}
     elif key.vk == libtcod.KEY_LEFT or key_char == 'h':
-        return {'move': (-1, 0)}
+        return {'look': (-1, 0)}
     elif key.vk == libtcod.KEY_RIGHT or key_char == 'l':
-        return {'move': (1, 0)}
+        return {'look': (1, 0)}
     elif key_char == 'y':
-        return {'move': (-1, -1)}
+        return {'look': (-1, -1)}
     elif key_char == 'u':
-        return {'move': (1, -1)}
+        return {'look': (1, -1)}
     elif key_char == 'b':
-        return {'move': (-1, 1)}
+        return {'look': (-1, 1)}
     elif key_char == 'n':
-        return {'move': (1, 1)}
+        return {'look': (1, 1)}
 
     if key.vk == libtcod.KEY_F11:
         # fullscreen = F11
@@ -132,7 +136,7 @@ def handle_player_dead_keys(key):
 
     elif key.vk == libtcod.KEY_ESCAPE:
         # Exit the menu
-        return {'exit': True}
+        return {'quit': True}
 
     if key.vk == libtcod.KEY_F11:
         # fullscreen = F11
@@ -180,6 +184,37 @@ def handle_character_screen(key):
     if key.vk == libtcod.KEY_ESCAPE:
         return {'exit': True}
 
+    if key.vk == libtcod.KEY_F11:
+        # fullscreen = F11
+        return {'fullscreen': True}
+
+    return {}
+
+
+def handle_esc_menu_keys(key):
+    if key:
+        key_char = chr(key.c)
+
+        if key_char == 'H' or key_char == 'h' or key_char == 'a':
+            return {'help': True}
+        if key_char == 'R' or key_char == 'r' or key_char == 'b':
+            return {'exit': True}
+        if key_char == 'Q' or key_char == 'q' or key_char == 'c':
+            return {'quit': True}
+
+    if key.vk == libtcod.KEY_ESCAPE:
+        return {'exit': True}
+
+    if key.vk == libtcod.KEY_F11:
+        # fullscreen = F11
+        return {'fullscreen': True}
+
+    return {}
+
+
+def handle_help_menu_keys(key):
+    if key.vk == libtcod.KEY_ESCAPE:
+        return {'exit': True}
     if key.vk == libtcod.KEY_F11:
         # fullscreen = F11
         return {'fullscreen': True}
